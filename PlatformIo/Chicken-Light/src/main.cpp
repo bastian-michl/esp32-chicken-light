@@ -33,6 +33,11 @@
 #include "SPIFFS.h"
 
 #include "time.h"
+
+#include <Wire.h>
+#include <SPI.h>
+
+#include "RTClib.h"
 //------------------------------
 
 //constants
@@ -42,8 +47,25 @@
 #define LED_GREEN     26
 #define LED_INTERN    2
 
+//PWM
+#define PWM_OUT 16
+
+//switch light on
+#define SWITCH1 27
+
+//brightness sensor
+#define BRIGHTNESS_DIGITAL_IN 13
+#define BRIGHTNESS_ANALOG_IN 36
+
+//temperature sensor
+#define DS18B20_DATA 21
+
 //serial
 #define SERIAL_BAUD_RATE 115200
+
+//I2C
+#define I2C_SCL     22
+#define I2C_SDA     21
 
 
 #define ESP_getChipId()   ((uint32_t)ESP.getEfuseMac())
@@ -63,6 +85,9 @@ AsyncWebServer server(80);
 
 //WiFi
 bool WifiConnected_b = false;
+
+//RTC DS3132
+RTC_DS3231 rtc;
 
 
 tm DateTime_st;
@@ -239,7 +264,7 @@ void setup()
   //----
 
 
-  // Send a GET request to <ESP_IP>/get?input1=<inputMessage>
+  // Send a GET request to 
   server.on("/get", HTTP_GET, [] (AsyncWebServerRequest *request) 
               {
                 String inputMessage;
@@ -356,7 +381,8 @@ String processor(const String& var)
   {
     GetDateTime_v();
 
-    RetStr = String(DateTime_st.tm_hour) + ":" + String(DateTime_st.tm_min) + ":" + String(DateTime_st.tm_sec);
+    RetStr = String(DateTime_st.tm_mday) + "-" + String(DateTime_st.tm_mon) + "-" + String(DateTime_st.tm_year) + "  " +
+             String(DateTime_st.tm_hour) + ":" + String(DateTime_st.tm_min) + ":" + String(DateTime_st.tm_sec);
 
     Serial.print("Date Time: ");
     Serial.print("\nRetStr: ");
@@ -464,6 +490,10 @@ float GetTemperature_f32(void)
 //------------------------------
 void GetDateTime_v(void)
 {
+  DateTime_st.tm_mday = 1;
+  DateTime_st.tm_mon = 1;
+  DateTime_st.tm_year = 2022;
+
   DateTime_st.tm_hour = 11;
   DateTime_st.tm_min = 22;
   DateTime_st.tm_sec = 33;
