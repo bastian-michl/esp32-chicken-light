@@ -1,0 +1,86 @@
+html 
+{
+  font-family: Helvetica;
+  display: inline-block;
+  margin: 0px auto;
+  text-align: center;
+}
+
+h1
+{
+  color: #0F3376;
+  padding: 2vh;
+}
+
+p
+{
+  font-size: 1.5rem;
+}
+
+.button
+{
+  display: inline-block;
+  background-color: #008CBA;
+  border: none;
+  border-radius: 4px;
+  color: white;
+  padding: 8px 20px;
+  text-decoration: none;
+  font-size: 25px;
+  margin: 2px;
+  cursor: pointer;
+}
+
+.button_red
+{
+  background-color: #f44336;
+} 
+
+.button_green
+{
+    background-color: #39dd15;
+}
+
+.button_orange
+{
+    background-color: #f0ae08;
+}
+
+.button_grey
+{
+    background-color: #746e5e;
+}
+
+.button_brown
+{
+    background-color: #4d3904;
+}
+
+.button_white
+{
+    background-color: #ffffff;
+    border: 2px outset buttonface;
+    color: #000000
+}
+
+.card-grid 
+{
+  max-width: 800px;
+  margin: 0 auto;
+  display: grid;
+  grid-gap: 2rem;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+.card 
+{
+  background-color: white;
+  box-shadow: 2px 2px 12px 1px rgba(140,140,140,.5);
+}
+
+.card-title 
+{
+  font-size: 1.2rem;
+  font-weight: bold;
+  color: #034078
+}

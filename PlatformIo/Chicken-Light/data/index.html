@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Hühnerhaus Beleuchtungssteuerung</title>
+        <meta name="viewport" content="width=device-width, initial-scale=0.8">
+        <meta content="text/html; charset=UTF-8" http-equiv="content-type">
+        <link rel="icon" href="data:,">
+        <link rel="stylesheet" type="text/css" href="style.css">
+
+    </head>
+
+    <body>
+
+        <a href="/"><img src="symbol_huhn.png" alt="" width="50" height="50"><b>Hühnerhaus Beleuchtungssteuerung</b><img src="symbol_huhn_gespiegelt.png" alt="" width="50" height="50"></a>
+        
+        <div class="card-grid">
+            <div class="card">
+                <p><img src="symbol_temperatur.png" alt="" width="50" height="50"><strong><br><br> %TEMP%°C</strong></p>
+            </div>
+        </div>
+
+        <br>
+
+        <div class="card-grid">
+            <div class="card">
+                <p><img src="symbol_uhr.png" alt="" width="50" height="50"><strong><br><br> %DATE_TIME%</strong></p>
+
+                <p>
+                    <form action="/get">
+                        Datum und Zeit einstellen (DD-MM-YYYY HH:MM:SS): <input type="text" name="InputDateTime" value="2022-05-15 13:14:00" size="20">
+                        <input type=image src="symbol_speichern.png" width="30" height="30" alt="senden">
+                    </form>
+                </p>
+            </div>
+        </div>
+
+        <br>
+
+        <div class="card-grid">
+            <div class="card">
+                <p><img src="symbol_tag.png" alt="" width="50" height="50"><strong><br><br> %SUNRISE%</strong></p>
+            </div>
+        </div>
+
+        <br>
+
+        <div class="card-grid">
+            <div class="card">
+                <p><img src="symbol_nacht.png" alt="" width="50" height="50"><strong><br><br> %SUNSET%</strong></p>
+            </div>
+        </div>
+
+        <br>
+
+
+        <div class="card-grid">
+            <div class="card">
+                <p>
+                    <img src="symbol_licht_birne_aus.png" alt="" width="50" height="50"><strong><br><br> %LIGHT_DUTYCYCLE% &#037</strong>
+                </p>        
+
+                <p>
+                    <a href="/LightOn"><button class="button button_white"><img src="symbol_licht_an.png" alt="Licht an (100&#037)" width="50" height="50"><br>Licht an (100&#037)</button></a>
+                    <a href="/LightOff"><button class="button button_white"><img src="symbol_licht_aus.png" alt="Licht aus (0&#037)" width="50" height="50"><br>Licht aus (0&#037)</button></a>
+                </p>
+                <br>
+                <br>
+                <a href="/LightControlOn"><button class="button button_white"><img src="symbol_play.png" alt="Lichtautomatik aktivieren" width="50" height="50"><br>Lichtautomatik aktivieren</button></a>
+                <a href="/LightControlOff"><button class="button button_white"><img src="symbol_stop.png" alt="Lichtautomatik deaktivieren" width="50" height="50"><br>Lichtautomatik deaktivieren</button></a>
+                <br>
+                <br>
+                <form action="/get">
+                    Schwellwert "dunkel" einstellen (IST: %THRESHOLD_DARK%): <input type="text" name="InputThresholdDark" value="5" size="5">
+                    <input type=image src="symbol_speichern.png" width="30" height="30" alt="senden">
+                </form>
+                <br>
+                <form action="/get">
+                    Schwellwert "hell" einstellen (IST: %THRESHOLD_BRIGHT%): <input type="text" name="InputThresholdBright" value="50" size="5">
+                    <input type=image src="symbol_speichern.png" width="30" height="30" alt="senden">
+                </form>
+                
+            </div>
+        </div>
+
+
+        
+
+        
+
+        
+
+    </body>
+
+    
+
+    
+</html>
