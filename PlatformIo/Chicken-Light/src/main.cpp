@@ -13,19 +13,21 @@
 //      pass values via html form (adjust RTC time+date, rise and fall times, threshold for light sensor)     OK
 //      buttons enable/disable light control
 //      switch on/off/dim light manually
-//      display time and temperature        OK
+//      display time and temperature          OK
 //  * DS3231 RTC
-//      init                  OK
-//      set date + time
-//      read date + time
+//      init                                  OK
+//      set date + time                       OK
+//      read date + time                      OK
 //  * PWM dimming led strip
 //  * light sensor
 //  * switch SW1 switch light on permanently
-//  * sunrise / sunset table, twillight times
-//  * calculate calendar week from date
+//  * sunrise / sunset table                  OK
+//  * twillight times
+//  * calculate calendar week from date       OK
 //  * DS18B20 temperature sensor
-//      init                OK
-//      read temperature
+//      init                                  OK
+//      read temperature                      OK
+//  * dim up / down using tasks               OK
 //------------------------------
 
 //includes
@@ -62,6 +64,9 @@
 
 //PWM
 #define PWM_OUT 16
+const uint16_t PwmFreqHz_u16 = 5000;
+const uint8_t PwmChannel_u8 = 0;
+const uint8_t PwmResolutionBit_u8 = 13;
 
 //switch light on
 #define SWITCH1 27
@@ -77,8 +82,8 @@
 #define SERIAL_BAUD_RATE 115200
 
 //I2C
-#define I2C_SCL     22
-#define I2C_SDA     21
+#define I2C_SCL     23
+#define I2C_SDA     22
 
 //RTC-EEPROM
 #define DS3231_EEPROM_ADDRESS 0x57
@@ -90,6 +95,7 @@
 const char* PARAM_INPUT_1 = "InputDateTime";
 const char* PARAM_INPUT_2 = "InputThresholdDark";
 const char* PARAM_INPUT_3 = "InputThresholdBright";
+
 //------------------------------
 
 
@@ -114,15 +120,24 @@ tm DateTime_st;
 tm Sunrise_st;
 tm Sunset_st;
 
+uint8_t CalendarWeekNumber_u8 = 0;
+
 uint8_t DutyCyclePercent_u8 = 0;
 
 uint8_t ThresholdDarkPercent_u8 = 0;
 uint8_t ThresholdBrightPercent_u8 = 100;
+
+uint8_t StartDutyCyclePercent_u8 = 0;
+uint8_t StopDutyCycle_u8 = 0;
+uint16_t RampUpTimeSec_u16 = 0;
+uint16_t RampDownTimeSec_u16 = 0;
 //------------------------------
 
 //function prototypes
 //------------------------------
 void main_task(void * pvParameters);
+void DimUp_task(void * pvParameters);
+void DimDown_task(void * pvParameters);
 
 String processor(const String& var);
 
@@ -134,6 +149,10 @@ void GetSunsetTime_v(void);
 float GetTemperature_f32(void);
 
 uint8_t CalcCalendarWeek_u8(uint16_t YYYY_u16, uint16_t MM_u16, uint16_t DD_u16);
+
+void SetPwmDutycycle(void);
+void DimUp_v(void);
+void DimDown_v(void);
 //------------------------------
 
 
@@ -154,6 +173,13 @@ void setup()
   pinMode(LED_INTERN, OUTPUT);
   //------------------------------
 
+  //PWM
+  //------------------------------
+  ledcSetup(PwmChannel_u8, PwmFreqHz_u16, PwmResolutionBit_u8);   //configure PWM
+  ledcAttachPin(PWM_OUT, PwmChannel_u8);  //attach GPIO pin
+  DutyCyclePercent_u8 = 0;
+  SetPwmDutycycle();
+  //------------------------------
 
 
   Serial.println("---- Starting ESP32 Chicken House Light Control... ----");
@@ -186,10 +212,16 @@ void setup()
   Serial.print("\n");
   //---
 
+  //I2C
+  //------------------------------
+  Wire.begin(I2C_SDA, I2C_SCL);   //I2C bus master
+  Wire.setClock(100000);           //clock freq 100kHz
+  //------------------------------
+
 
   //RTC
   //---
-  if (! rtc.begin()) 
+  if (!rtc.begin()) 
   {
     Serial.println("couldn't find RTC!\n");
   }
@@ -228,6 +260,78 @@ void setup()
                 request->send(SPIFFS, "/style.css", "text/css");
               }
             );
+
+
+  // Route for button Light On
+  server.on("/LightOn", HTTP_GET, [](AsyncWebServerRequest *request)
+              {
+                DutyCyclePercent_u8 = 100;
+                SetPwmDutycycle();
+
+                Serial.print("Set DutyCycle: ");
+                Serial.print(DutyCyclePercent_u8);
+                Serial.print("%\n");
+
+                request->send(SPIFFS, "/index.html", String(), false, processor);
+              }
+            );
+
+  // Route for button LightOff
+  server.on("/LightOff", HTTP_GET, [](AsyncWebServerRequest *request)
+              {
+                DutyCyclePercent_u8 = 0;
+                SetPwmDutycycle();
+
+                Serial.print("Set DutyCycle: ");
+                Serial.print(DutyCyclePercent_u8);
+                Serial.print("%\n");
+
+                request->send(SPIFFS, "/index.html", String(), false, processor);
+              }
+            );
+
+
+  // Route for button LightControlOn
+  server.on("/LightControlOn", HTTP_GET, [](AsyncWebServerRequest *request)
+              {
+                Serial.print("dimming up...");
+              
+                request->send(SPIFFS, "/index.html", String(), false, processor);
+                
+                StartDutyCyclePercent_u8 = 0;
+                StopDutyCycle_u8 = 100;
+                RampUpTimeSec_u16 = 10;
+                RampDownTimeSec_u16 = 0;
+
+                //create dim task
+                xTaskCreate(DimUp_task, "DimUp task", 1024, NULL, 1, NULL);
+                
+              }
+            );
+
+
+  // Route for button LightControlOff
+  server.on("/LightControlOff", HTTP_GET, [](AsyncWebServerRequest *request)
+              {
+                Serial.print("dimming down...");
+              
+                request->send(SPIFFS, "/index.html", String(), false, processor);
+                
+                StartDutyCyclePercent_u8 = 100;
+                StopDutyCycle_u8 = 0;
+                RampUpTimeSec_u16 = 0;
+                RampDownTimeSec_u16 = 10;
+
+                //create dim task
+                xTaskCreate(DimDown_task, "DimDown task", 1024, NULL, 1, NULL);
+              }
+            );
+
+
+
+  
+
+
 
   // Route to symbol images
   //----
@@ -401,9 +505,47 @@ void main_task(void * pvParameters)
     {
       vTaskDelay(pdMS_TO_TICKS(200));
     }
+
+
     
 
   }
+}
+//------------------------------
+
+
+
+
+//------------------------------
+//dim up task
+//------------------------------
+void DimUp_task(void * pvParameters) 
+{
+  Serial.println("DimUp task started");
+
+  DimUp_v();
+
+  Serial.println("DimUp task finished");
+  
+  vTaskDelete(NULL);
+  
+}
+//------------------------------
+
+
+//------------------------------
+//dim down task
+//------------------------------
+void DimDown_task(void * pvParameters) 
+{
+  Serial.println("DimDown task started");
+
+  DimDown_v();
+
+  Serial.println("DimDown task finished");
+
+  vTaskDelete(NULL);
+  
 }
 //------------------------------
 
@@ -423,8 +565,16 @@ String processor(const String& var)
   {
     GetDateTime_v();
 
-    RetStr = String(DateTime_st.tm_mday) + "-" + String(DateTime_st.tm_mon) + "-" + String(DateTime_st.tm_year) + "  " +
-             String(DateTime_st.tm_hour) + ":" + String(DateTime_st.tm_min) + ":" + String(DateTime_st.tm_sec);
+    if(DateTime_st.tm_min > 9)
+    {
+      RetStr = String(DateTime_st.tm_mday) + "-" + String(DateTime_st.tm_mon) + "-" + String(DateTime_st.tm_year) + "  " +
+              String(DateTime_st.tm_hour) + ":" + String(DateTime_st.tm_min);
+    }
+    else
+    {
+      RetStr = String(DateTime_st.tm_mday) + "-" + String(DateTime_st.tm_mon) + "-" + String(DateTime_st.tm_year) + "  " +
+              String(DateTime_st.tm_hour) + ":0" + String(DateTime_st.tm_min);
+    }
 
     Serial.print("Date Time: ");
     Serial.print("\nRetStr: ");
@@ -463,7 +613,28 @@ String processor(const String& var)
   {
     GetSunriseTime_v();
 
-    RetStr = String(Sunrise_st.tm_hour) + ":" + String(Sunrise_st.tm_min) + ":00";
+    if(Sunrise_st.tm_min > 9)
+    {
+      if(Sunrise_st.tm_hour > 9)
+      {
+        RetStr = String(Sunrise_st.tm_hour) + ":" + String(Sunrise_st.tm_min);
+      }
+      else
+      {
+        RetStr = "0" + String(Sunrise_st.tm_hour) + ":" + String(Sunrise_st.tm_min);
+      }
+    }
+    else
+    {
+      if(Sunrise_st.tm_hour > 9)
+      {
+        RetStr = String(Sunrise_st.tm_hour) + ":0" + String(Sunrise_st.tm_min);
+      }
+      else
+      {
+        RetStr = "0" + String(Sunrise_st.tm_hour) + ":0" + String(Sunrise_st.tm_min);
+      }
+    }
 
     Serial.print("Sunrise Time: ");
     Serial.print("\nRetStr: ");
@@ -476,7 +647,28 @@ String processor(const String& var)
   {
     GetSunsetTime_v();
 
-    RetStr = String(Sunset_st.tm_hour) + ":" + String(Sunset_st.tm_min) + ":00";
+    if(Sunset_st.tm_min > 9)
+    {
+      if(Sunset_st.tm_hour > 9)
+      {
+        RetStr = String(Sunset_st.tm_hour) + ":" + String(Sunset_st.tm_min);
+      }
+      else
+      {
+        RetStr = "0" + String(Sunset_st.tm_hour) + ":" + String(Sunset_st.tm_min);
+      }
+    }
+    else
+    {
+      if(Sunset_st.tm_hour > 9)
+      {
+        RetStr = String(Sunset_st.tm_hour) + ":0" + String(Sunset_st.tm_min);
+      }
+      else
+      {
+        RetStr = "0" + String(Sunset_st.tm_hour) + ":0" + String(Sunset_st.tm_min);
+      }
+    }
 
     Serial.print("Sunset Time: ");
     Serial.print("\nRetStr: ");
@@ -513,6 +705,77 @@ String processor(const String& var)
 }
 //------------------------------
 
+
+
+//------------------------------
+// Set PWM dutycycle
+//------------------------------
+void SetPwmDutycycle(void)
+{
+  //set PWM dutycycle (range: 0...2^resolution - 1)
+  ledcWrite(PwmChannel_u8, ( (1<<PwmResolutionBit_u8) - 1) / 100 * DutyCyclePercent_u8);
+}
+//------------------------------
+
+
+//------------------------------
+// Dim LED up
+//------------------------------
+void DimUp_v(void)
+{
+    uint8_t DutyCycleSteps_u8 = StartDutyCyclePercent_u8 - StopDutyCycle_u8;
+
+    uint32_t DelayBetweenStepsMsec_u32 = RampUpTimeSec_u16 * 1000 / DutyCycleSteps_u8;
+
+    DutyCyclePercent_u8 = StartDutyCyclePercent_u8;
+
+    SetPwmDutycycle();
+
+    while(DutyCycleSteps_u8)
+    {
+      delay(DelayBetweenStepsMsec_u32);
+      
+      if(DutyCyclePercent_u8 < 100)
+      {
+        DutyCyclePercent_u8++;
+      }
+
+      SetPwmDutycycle();
+
+      DutyCycleSteps_u8--;
+    }
+}
+//------------------------------
+
+
+//------------------------------
+// Dim LED down
+//------------------------------
+void DimDown_v(void)
+{
+  uint8_t DutyCycleSteps_u8 = StartDutyCyclePercent_u8 - StopDutyCycle_u8;
+
+  uint32_t DelayBetweenStepsMsec_u32 = RampDownTimeSec_u16 * 1000 / DutyCycleSteps_u8;
+
+  DutyCyclePercent_u8 = StartDutyCyclePercent_u8;
+
+  SetPwmDutycycle();
+
+  while(DutyCycleSteps_u8)
+  {
+    delay(DelayBetweenStepsMsec_u32);
+    
+    if(DutyCyclePercent_u8 > 0)
+    {
+      DutyCyclePercent_u8--;
+    }
+
+    SetPwmDutycycle();
+
+    DutyCycleSteps_u8--;
+  }
+}
+//------------------------------
 
 
 //------------------------------
@@ -553,6 +816,13 @@ void GetDateTime_v(void)
   DateTime_st.tm_hour = int(now.hour());
   DateTime_st.tm_min = int(now.minute());
   DateTime_st.tm_sec = int(now.second());
+
+  //calculation of calendar week
+  CalendarWeekNumber_u8 = CalcCalendarWeek_u8(DateTime_st.tm_year, DateTime_st.tm_mon, DateTime_st.tm_mday);
+  Serial.print("calendar week: ");
+  Serial.print(CalendarWeekNumber_u8);
+  Serial.print("\n");
+
 }
 //------------------------------
 
@@ -562,12 +832,116 @@ void GetDateTime_v(void)
 //------------------------------
 void SetDateTime_v(String DateTimeString)
 {
+  uint16_t Year_u16 = 0;
+  uint8_t Month_u8 = 0;
+  uint8_t Day_u8 = 0;
+  uint8_t Hour_u8 = 0;
+  uint8_t Minute_u8 = 0;
+  uint8_t Second_u8 = 0;
+  char buf5 [5] = {0};
+  char buf3 [3] = {0};
+  char buf2 [2] = {0};
 
   //convert date-time-string to yyyy, mm, dd, hh, mm, ss
+  // Y Y Y Y - M M - D D     H  H  :  M  M  :  S  S
+  // 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18
 
-  rtc.adjust(DateTime(2022, 1, 1, 0, 0, 0));  //set RTC to YYYY, M, D, H, M, S
+  //year
+  buf5 [0] = DateTimeString [0];
+  buf5 [1] = DateTimeString [1];
+  buf5 [2] = DateTimeString [2];
+  buf5 [3] = DateTimeString [3];
+  buf5 [4] = '\0';
+  Year_u16 = atoi(buf5);
 
-  Serial.println("RTC time set!");
+  //month
+  if(DateTimeString [5] != '0')
+  {
+    buf3 [0] = DateTimeString [5];
+    buf3 [1] = DateTimeString [6];
+    buf3 [2] = '\0';
+    Month_u8 = atoi(buf3);
+  }
+  else
+  {
+    buf2 [0] = DateTimeString [6];
+    buf2 [1] = '\0';
+    Month_u8 = atoi(buf2);
+  }
+
+  //day
+  if(DateTimeString [8] != '0')
+  {
+    buf3 [0] = DateTimeString [8];
+    buf3 [1] = DateTimeString [9];
+    buf3 [2] = '\0';
+    Day_u8 = atoi(buf3);
+  }
+  else
+  {
+    buf2 [0] = DateTimeString [9];
+    buf2 [1] = '\0';
+    Day_u8 = atoi(buf2);
+  }
+
+  //hours
+  if(DateTimeString [11] != '0')
+  {
+    buf3 [0] = DateTimeString [11];
+    buf3 [1] = DateTimeString [12];
+    buf3 [2] = '\0';
+    Hour_u8 = atoi(buf3);
+  }
+  else
+  {
+    buf2 [0] = DateTimeString [12];
+    buf2 [1] = '\0';
+    Hour_u8 = atoi(buf2);
+  }
+
+  //minutes
+  if(DateTimeString [14] != '0')
+  {
+    buf3 [0] = DateTimeString [14];
+    buf3 [1] = DateTimeString [15];
+    buf3 [2] = '\0';
+    Minute_u8 = atoi(buf3);
+  }
+  else
+  {
+    buf2 [0] = DateTimeString [15];
+    buf2 [1] = '\0';
+    Minute_u8 = atoi(buf2);
+  }
+
+  //seconds
+  if(DateTimeString [17] != '0')
+  {
+    buf3 [0] = DateTimeString [17];
+    buf3 [1] = DateTimeString [18];
+    buf3 [2] = '\0';
+    Second_u8 = atoi(buf3);
+  }
+  else
+  {
+    buf2 [0] = DateTimeString [18];
+    buf2 [1] = '\0';
+    Second_u8 = atoi(buf2);
+  }
+
+  Serial.print("set RTC to: \n");
+  Serial.println(Year_u16);
+  Serial.println(Month_u8);
+  Serial.println(Day_u8);
+  Serial.println(Hour_u8);
+  Serial.println(Minute_u8);
+  Serial.println(Second_u8);
+  Serial.print("\n");
+  
+
+  rtc.adjust(DateTime(Year_u16, Month_u8, Day_u8, Hour_u8, Minute_u8, Second_u8));  //set RTC to YYYY, M, D, H, M, S
+
+  Serial.println("RTC says: ");
 
   //buffer can be defined using following combinations:
   //hh - the hour with a leading zero (00 to 23)
@@ -582,8 +956,8 @@ void SetDateTime_v(String DateTimeString)
 
   DateTime now = rtc.now();
 
-  char buf2[] = "YYMMDD-hh:mm:ss";
-  Serial.println(now.toString(buf2));
+  char buf15[] = "YYMMDD-hh:mm:ss";
+  Serial.println(now.toString(buf15));
 }
 //------------------------------
 
@@ -593,8 +967,9 @@ void SetDateTime_v(String DateTimeString)
 //------------------------------
 void GetSunriseTime_v(void)
 {
-  Sunrise_st.tm_hour = 5;
-  Sunrise_st.tm_min = 55;
+
+  Sunrise_st.tm_hour = SunriseSunset_au8 [CalendarWeekNumber_u8 - 1] [0];
+  Sunrise_st.tm_min = SunriseSunset_au8 [CalendarWeekNumber_u8 - 1] [1];
 }
 //------------------------------
 
@@ -604,8 +979,8 @@ void GetSunriseTime_v(void)
 //------------------------------
 void GetSunsetTime_v(void)
 {
-  Sunset_st.tm_hour = 20;
-  Sunset_st.tm_min = 53;
+  Sunset_st.tm_hour = SunriseSunset_au8 [CalendarWeekNumber_u8 - 1] [2];
+  Sunset_st.tm_min = SunriseSunset_au8 [CalendarWeekNumber_u8 - 1] [3];
 }
 //------------------------------
 
