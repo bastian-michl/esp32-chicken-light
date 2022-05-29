@@ -11,9 +11,9 @@
 //  * wifi hotspot mode
 //  * web server
 //      pass values via html form (adjust RTC time+date, rise and fall times, threshold for light sensor)     OK
-//      buttons enable/disable light control
-//      switch on/off/dim light manually
-//      display time and temperature          OK
+//      buttons enable/disable light control and visualize running light control TESTING
+//      switch on/off/dim light manually                                          OK
+//      display time and temperature                                              OK
 //  * DS3231 RTC
 //      init                                  OK
 //      set date + time                       OK
@@ -38,6 +38,8 @@
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+
+
 #include "WiFiCredentials.h"
 
 #include "SPIFFS.h"
@@ -96,11 +98,20 @@ const char* PARAM_INPUT_1 = "InputDateTime";
 const char* PARAM_INPUT_2 = "InputThresholdDark";
 const char* PARAM_INPUT_3 = "InputThresholdBright";
 
+
+
 //------------------------------
 
 
 //global variables
 //------------------------------
+
+//Wifi
+#ifdef USE_ACCESS_POINT
+  IPAddress local_IP(192,168,111,1);
+  IPAddress gateway(192,168,111,1);
+  IPAddress subnet(255,255,255,0);
+#endif
 
 //web server
 AsyncWebServer server(80);
@@ -131,6 +142,14 @@ uint8_t StartDutyCyclePercent_u8 = 0;
 uint8_t StopDutyCycle_u8 = 0;
 uint16_t RampUpTimeSec_u16 = 0;
 uint16_t RampDownTimeSec_u16 = 0;
+
+bool LightOn_b = false;
+
+bool DimTaskRunning_b = false;
+
+bool LightControlRunning_b = false;
+
+TaskHandle_t LightControl_taskHandle;
 //------------------------------
 
 //function prototypes
@@ -138,10 +157,11 @@ uint16_t RampDownTimeSec_u16 = 0;
 void main_task(void * pvParameters);
 void DimUp_task(void * pvParameters);
 void DimDown_task(void * pvParameters);
+void LightControl_task(void * pvParameters) ;
 
 String processor(const String& var);
 
-void GetDateTime_v(void);
+DateTime GetDateTime_v(void);
 void SetDateTime_v(String DateTimeString);
 void GetSunriseTime_v(void);
 void GetSunsetTime_v(void);
@@ -173,6 +193,11 @@ void setup()
   pinMode(LED_INTERN, OUTPUT);
   //------------------------------
 
+  //Switch
+  //------------------------------
+  pinMode(SWITCH1, INPUT_PULLUP);
+  //------------------------------
+
   //PWM
   //------------------------------
   ledcSetup(PwmChannel_u8, PwmFreqHz_u16, PwmResolutionBit_u8);   //configure PWM
@@ -195,17 +220,28 @@ void setup()
 
   //wifi
   //---
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-  if (WiFi.waitForConnectResult() != WL_CONNECTED) 
-  {
-    Serial.printf("WiFi Connection Failed!\n");
-    return;
-  }
-  else
-  {
+  #ifdef USE_ACCESS_POINT
+    //start in access point mode
+    WiFi.softAPConfig(local_IP, gateway, subnet);
+    WiFi.softAP(ssid,password);
+    Serial.printf("Settiung up WiFi Access Point ");
+    Serial.printf(ssid);
+    Serial.printf("\n");
     WifiConnected_b = true;
-  }
+  #else
+    //start as client
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+    if (WiFi.waitForConnectResult() != WL_CONNECTED) 
+    {
+      Serial.printf("WiFi Connection Failed!\n");
+      return;
+    }
+    else
+    {
+      WifiConnected_b = true;
+    }
+  #endif
 
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
@@ -272,6 +308,8 @@ void setup()
                 Serial.print(DutyCyclePercent_u8);
                 Serial.print("%\n");
 
+                LightOn_b = true;
+
                 request->send(SPIFFS, "/index.html", String(), false, processor);
               }
             );
@@ -286,6 +324,8 @@ void setup()
                 Serial.print(DutyCyclePercent_u8);
                 Serial.print("%\n");
 
+                LightOn_b = false;
+
                 request->send(SPIFFS, "/index.html", String(), false, processor);
               }
             );
@@ -294,17 +334,37 @@ void setup()
   // Route for button LightControlOn
   server.on("/LightControlOn", HTTP_GET, [](AsyncWebServerRequest *request)
               {
-                Serial.print("dimming up...");
-              
-                request->send(SPIFFS, "/index.html", String(), false, processor);
+                if(LightControlRunning_b == false)
+                {
                 
-                StartDutyCyclePercent_u8 = 0;
-                StopDutyCycle_u8 = 100;
-                RampUpTimeSec_u16 = 10;
-                RampDownTimeSec_u16 = 0;
+                  LightControlRunning_b = true;
 
-                //create dim task
-                xTaskCreate(DimUp_task, "DimUp task", 1024, NULL, 1, NULL);
+                  Serial.print("Light Control Enabled\n");
+
+                  //create light control task
+                  xTaskCreate(LightControl_task, "Light Control Task", 4096*4, NULL, 1, &LightControl_taskHandle);
+
+                }
+
+                //just for TESTING
+                //---------
+                if(0)
+                {
+                  Serial.print("dimming up...\n");
+                
+                  request->send(SPIFFS, "/index.html", String(), false, processor);
+                  
+                  StartDutyCyclePercent_u8 = 0;
+                  StopDutyCycle_u8 = 100;
+                  RampUpTimeSec_u16 = 10;
+                  RampDownTimeSec_u16 = 0;
+
+                  //create dim task
+                  xTaskCreate(DimUp_task, "DimUp task", 1024, NULL, 1, NULL);
+                }
+                //---------
+
+                 request->send(SPIFFS, "/index.html", String(), false, processor);
                 
               }
             );
@@ -313,17 +373,46 @@ void setup()
   // Route for button LightControlOff
   server.on("/LightControlOff", HTTP_GET, [](AsyncWebServerRequest *request)
               {
-                Serial.print("dimming down...");
-              
-                request->send(SPIFFS, "/index.html", String(), false, processor);
-                
-                StartDutyCyclePercent_u8 = 100;
-                StopDutyCycle_u8 = 0;
-                RampUpTimeSec_u16 = 0;
-                RampDownTimeSec_u16 = 10;
+                Serial.print("Light Control Disabled\n");
 
-                //create dim task
-                xTaskCreate(DimDown_task, "DimDown task", 1024, NULL, 1, NULL);
+                LightControlRunning_b = false;
+                
+                //stopping light control task and switch off light
+                if(LightControl_taskHandle != NULL) 
+                {
+                  Serial.print("Stopping Light Control Task...\n");
+                  vTaskDelete(LightControl_taskHandle);
+                }
+                else
+                {
+                  Serial.print("Light Control TaskHandle = NULL...\n");
+                }
+
+
+                DutyCyclePercent_u8 = 0;
+                SetPwmDutycycle();
+                
+                
+
+                //just for TESTING
+                //---------
+                if(0)
+                {
+                  Serial.print("dimming down...\n");
+                
+                  request->send(SPIFFS, "/index.html", String(), false, processor);
+                  
+                  StartDutyCyclePercent_u8 = 100;
+                  StopDutyCycle_u8 = 0;
+                  RampUpTimeSec_u16 = 0;
+                  RampDownTimeSec_u16 = 10;
+
+                  //create dim task
+                  xTaskCreate(DimDown_task, "DimDown task", 1024, NULL, 1, NULL);
+                }
+                //---------
+
+                request->send(SPIFFS, "/index.html", String(), false, processor);
               }
             );
 
@@ -506,6 +595,41 @@ void main_task(void * pvParameters)
       vTaskDelay(pdMS_TO_TICKS(200));
     }
 
+    //switch light manually on/off using hardware switch SWITCH1
+    //------
+    if((digitalRead(SWITCH1) == 0) && (LightOn_b == false) && (DimTaskRunning_b == false)) 
+    {
+      //switch light on
+      Serial.print("dimming up...\n");
+      
+      LightOn_b = true;
+      digitalWrite(LED_INTERN, HIGH);
+
+      //create dim task
+      StartDutyCyclePercent_u8 = 0;
+      StopDutyCycle_u8 = 100;
+      RampUpTimeSec_u16 = 2;
+      RampDownTimeSec_u16 = 0;
+      xTaskCreate(DimUp_task, "DimUp task", 1024, NULL, 1, NULL);
+    }
+
+    else if((digitalRead(SWITCH1) == 1) && (LightOn_b == true) && (DimTaskRunning_b == false)) 
+    {
+      //switch light off
+      Serial.print("dimming down...\n");
+              
+      LightOn_b = false;
+      digitalWrite(LED_INTERN, LOW);
+
+      //create dim task
+      StartDutyCyclePercent_u8 = 100;
+      StopDutyCycle_u8 = 0;
+      RampUpTimeSec_u16 = 0;
+      RampDownTimeSec_u16 = 2;
+      xTaskCreate(DimDown_task, "DimDown task", 1024, NULL, 1, NULL);
+    }
+    //------
+
 
     
 
@@ -515,17 +639,138 @@ void main_task(void * pvParameters)
 
 
 
+//------------------------------
+//Light Control Task
+//------------------------------
+void LightControl_task(void * pvParameters) 
+{
+
+  bool WaitForHold_b = false;
+
+  const uint16_t UpTimeSec_u16 = 10;
+  const uint16_t DownTimeSec_u16 = 10;
+
+  const uint32_t HoldTimeSunriseSeconds_u32 = 10;
+  const uint32_t HoldTimeSunsetSeconds_u32 = 10;
+
+  uint32_t HoldStartTimestamp_u32 = 0;
+  uint32_t ExpiredHoldTimeSeconds_u32 = 0;
+
+
+  const int OffsetHourSunrise_u32 = 0;
+  const int OffsetMinuteSunrise_u32 = 0;
+  const int OffsetHourSunset_u32 = 0;
+  const int OffsetMinuteSunset_u32 = 0;
+
+  DateTime now;
+
+
+  while(1)
+  { 
+    Serial.print("Light Control Task Running...");
+  
+    //get date and time
+    GetDateTime_v();
+
+    //get sunrise and sunset time
+    GetSunriseTime_v();
+    GetSunsetTime_v();
+
+    //DEBUG
+    Sunrise_st.tm_hour = DateTime_st.tm_hour;
+    Sunrise_st.tm_min = DateTime_st.tm_min;
+
+    //if sunrise time is reached, start dim up task
+    if((DateTime_st.tm_hour == Sunrise_st.tm_hour)
+        && (DateTime_st.tm_min == Sunrise_st.tm_min)
+        && WaitForHold_b == false)
+    {
+      //dim up light
+      Serial.print("dimming up...\n");
+      
+      digitalWrite(LED_INTERN, HIGH);
+
+      //create dim task
+      StartDutyCyclePercent_u8 = 0;
+      StopDutyCycle_u8 = 100;
+      RampUpTimeSec_u16 = UpTimeSec_u16;
+      RampDownTimeSec_u16 = 0;
+      xTaskCreate(DimUp_task, "DimUp task", 1024, NULL, 1, NULL);
+
+      WaitForHold_b = true;
+
+    }
+
+    //wait for hold time to expire
+    if(WaitForHold_b)
+    {
+      Serial.print("entering hold time loop...\n");
+
+      //save start timestamp
+      now = GetDateTime_v();
+      HoldStartTimestamp_u32 = now.unixtime();
+
+      Serial.print("HoldStartTimestamp: ");
+      Serial.print(HoldStartTimestamp_u32);
+      Serial.print("\n");
+
+      while(ExpiredHoldTimeSeconds_u32 < HoldTimeSunriseSeconds_u32)
+      {
+        now = GetDateTime_v();
+        ExpiredHoldTimeSeconds_u32 = now.unixtime() - HoldStartTimestamp_u32;
+
+        Serial.print("waiting for hold time to expire...\n");
+        Serial.print(ExpiredHoldTimeSeconds_u32);
+        Serial.print("sec of ");
+        Serial.print(HoldTimeSunriseSeconds_u32);
+        Serial.print("sec expired\n");
+
+        delay(2000);
+
+      }
+    }
+
+    
+
+
+    //if hold time is up, switch off light
+
+
+    //if sunset time is reached, switch on light (100%)
+
+    //wait hold time
+
+    //start dim down task
+
+
+    
+    //sleep
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+  }
+
+  vTaskDelete(NULL);
+
+}
+
+
+
 
 //------------------------------
 //dim up task
 //------------------------------
 void DimUp_task(void * pvParameters) 
 {
+
+  DimTaskRunning_b = true;
+
   Serial.println("DimUp task started");
 
   DimUp_v();
 
   Serial.println("DimUp task finished");
+
+  DimTaskRunning_b = false;
   
   vTaskDelete(NULL);
   
@@ -538,11 +783,15 @@ void DimUp_task(void * pvParameters)
 //------------------------------
 void DimDown_task(void * pvParameters) 
 {
+  DimTaskRunning_b = true;
+
   Serial.println("DimDown task started");
 
   DimDown_v();
 
   Serial.println("DimDown task finished");
+
+  DimTaskRunning_b = false;
 
   vTaskDelete(NULL);
   
@@ -805,7 +1054,7 @@ float GetTemperature_f32(void)
 //------------------------------
 // Get date and time from DS3231
 //------------------------------
-void GetDateTime_v(void)
+DateTime GetDateTime_v(void)
 {
   DateTime now = rtc.now();   //get current time from RTC 
 
@@ -822,6 +1071,8 @@ void GetDateTime_v(void)
   Serial.print("calendar week: ");
   Serial.print(CalendarWeekNumber_u8);
   Serial.print("\n");
+
+  return now;
 
 }
 //------------------------------
