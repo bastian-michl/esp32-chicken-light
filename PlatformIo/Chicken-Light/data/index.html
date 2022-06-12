@@ -25,6 +25,8 @@
             <div class="card">
                 <p><img src="symbol_uhr.png" alt="" width="50" height="50"><strong><br><br> %DATE_TIME%</strong></p>
 
+                <p><br>(GMT +1, keine Sommerzeit)</p>
+
                 <p>
                     <form action="/get">
                         Datum und Zeit einstellen (DD-MM-YYYY HH:MM:SS): <input type="text" name="InputDateTime" value="2022-05-15 13:14:00" size="20">
@@ -74,7 +76,11 @@
             <div class="card">
                 <p>
                     <img src="symbol_licht_birne_aus.png" alt="" width="50" height="50"><strong><br><br> %LIGHT_DUTYCYCLE% &#037</strong>
-                </p>        
+                </p>   
+                
+                <p>
+                    <strong><br><br> Automatik-Status: %STATE%</strong>
+                </p>
 
                 <p>
                     <a href="/LightOn"><button class="button button_white"><img src="symbol_licht_an.png" alt="Licht an (100&#037)" width="50" height="50"><br>Licht an (100&#037)</button></a>

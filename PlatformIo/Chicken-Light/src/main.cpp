@@ -40,16 +40,24 @@
 #include <ESPAsyncWebServer.h>
 
 
-#include "WiFiCredentials.h"
+#include "WiFiCredentials.h" //--> switch client / access point mode can also bei found here!
 
 #include "SPIFFS.h"
 
 #include "time.h"
 
+
 #include <Wire.h>
 #include <SPI.h>
 
 #include "RTClib.h"
+
+#define USE_NTP   //use NTP client for time keeping
+
+#ifdef USE_NTP
+  #include <NTPClient.h>
+  #include <WiFiUdp.h>
+#endif
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -98,6 +106,15 @@ const char* PARAM_INPUT_1 = "InputDateTime";
 const char* PARAM_INPUT_2 = "InputThresholdDark";
 const char* PARAM_INPUT_3 = "InputThresholdBright";
 
+//light control states
+#define STATE_IDLE 0
+#define STATE_DIM_UP 1
+#define STATE_WAITING_HOLD_TIME_SUNRISE 2
+#define STATE_WAITING_HOLD_TIME_SUNSET 3
+#define STATE_DIM_DOWN 4
+#define STATE_STOP 5
+
+
 
 
 //------------------------------
@@ -122,6 +139,12 @@ bool WifiConnected_b = false;
 //RTC DS3132
 RTC_DS3231 rtc;     //examples: https://wolles-elektronikkiste.de/ds3231-echtzeituhr
 
+//NTP
+#ifdef USE_NTP
+  WiFiUDP ntpUDP;
+  NTPClient timeClient(ntpUDP);
+#endif
+
 //DS18B20 temperature sensor
 OneWire oneWire(DS18B20_DATA);
 DallasTemperature DS18B20(&oneWire);
@@ -130,6 +153,9 @@ DallasTemperature DS18B20(&oneWire);
 tm DateTime_st;
 tm Sunrise_st;
 tm Sunset_st;
+
+uint16_t UpdateNtpCounter_u16 = 0;
+String NtpFormattedDate;
 
 uint8_t CalendarWeekNumber_u8 = 0;
 
@@ -148,8 +174,11 @@ bool LightOn_b = false;
 bool DimTaskRunning_b = false;
 
 bool LightControlRunning_b = false;
+uint8_t LightControlState_u8 = STATE_IDLE;
 
 TaskHandle_t LightControl_taskHandle;
+TaskHandle_t DimUp_taskHandle;
+TaskHandle_t DimDown_taskHandle;
 //------------------------------
 
 //function prototypes
@@ -255,6 +284,12 @@ void setup()
   //------------------------------
 
 
+  //temperature sensor dummy read
+  //------------------------------
+  //float dummy_f32 = GetTemperature_f32();
+  //------------------------------
+
+
   //RTC
   //---
   if (!rtc.begin()) 
@@ -269,6 +304,29 @@ void setup()
     rtc.adjust(DateTime(2022, 1, 1, 0, 0, 0));  //set RTC to YYYY, M, D, H, M, S
   }
   //---
+
+  //NTP
+  //---
+  #ifdef USE_NTP
+    // Initialize a NTPClient to get time
+    timeClient.begin();
+    timeClient.setTimeOffset(3600);
+
+    if(!timeClient.update()) 
+        {
+          timeClient.forceUpdate();
+        }
+
+        // The formattedDate comes with the following format:
+        // 2018-05-28T16:00:13Z
+        NtpFormattedDate = timeClient.getFormattedDate();
+
+        Serial.println("NTP date is: ");
+        Serial.println(NtpFormattedDate);
+
+        //set date and time of RTC
+      SetDateTime_v(NtpFormattedDate);
+  #endif
 
   //SPIFFS
   //---
@@ -301,14 +359,30 @@ void setup()
   // Route for button Light On
   server.on("/LightOn", HTTP_GET, [](AsyncWebServerRequest *request)
               {
-                DutyCyclePercent_u8 = 100;
-                SetPwmDutycycle();
+                //DutyCyclePercent_u8 = 100;
+                //SetPwmDutycycle();
 
-                Serial.print("Set DutyCycle: ");
-                Serial.print(DutyCyclePercent_u8);
-                Serial.print("%\n");
+                //Serial.print("Set DutyCycle: ");
+                //Serial.print(DutyCyclePercent_u8);
+                //Serial.print("%\n");
 
-                LightOn_b = true;
+                
+                
+
+                if(DimTaskRunning_b == false) 
+                {
+                  digitalWrite(LED_INTERN, HIGH);
+                  //LightOn_b = true;
+
+                  StartDutyCyclePercent_u8 = 0;
+                  StopDutyCycle_u8 = 100;
+                  RampUpTimeSec_u16 = 2;
+                  RampDownTimeSec_u16 = 0;
+
+                  //create dim task
+                  xTaskCreate(DimUp_task, "DimUp task", 1024, NULL, 1, &DimUp_taskHandle);
+                }
+
 
                 request->send(SPIFFS, "/index.html", String(), false, processor);
               }
@@ -317,14 +391,28 @@ void setup()
   // Route for button LightOff
   server.on("/LightOff", HTTP_GET, [](AsyncWebServerRequest *request)
               {
-                DutyCyclePercent_u8 = 0;
-                SetPwmDutycycle();
+                //DutyCyclePercent_u8 = 0;
+                //SetPwmDutycycle();
 
-                Serial.print("Set DutyCycle: ");
-                Serial.print(DutyCyclePercent_u8);
-                Serial.print("%\n");
+                //Serial.print("Set DutyCycle: ");
+                //Serial.print(DutyCyclePercent_u8);
+                //Serial.print("%\n");
 
-                LightOn_b = false;
+                //LightOn_b = false;
+
+                if(DimTaskRunning_b == false) 
+                {
+                  digitalWrite(LED_INTERN, LOW);
+                  //LightOn_b = false;
+
+                  StartDutyCyclePercent_u8 = 100;
+                  StopDutyCycle_u8 = 0;
+                  RampUpTimeSec_u16 = 0;
+                  RampDownTimeSec_u16 = 2;
+
+                  //create dim task
+                  xTaskCreate(DimDown_task, "DimDown task", 1024, NULL, 1, &DimDown_taskHandle);
+                }
 
                 request->send(SPIFFS, "/index.html", String(), false, processor);
               }
@@ -340,6 +428,8 @@ void setup()
                   LightControlRunning_b = true;
 
                   Serial.print("Light Control Enabled\n");
+
+                  LightControlState_u8 = STATE_IDLE;
 
                   //create light control task
                   xTaskCreate(LightControl_task, "Light Control Task", 4096*4, NULL, 1, &LightControl_taskHandle);
@@ -376,6 +466,8 @@ void setup()
                 Serial.print("Light Control Disabled\n");
 
                 LightControlRunning_b = false;
+
+                LightControlState_u8 = STATE_IDLE;
                 
                 //stopping light control task and switch off light
                 if(LightControl_taskHandle != NULL) 
@@ -389,8 +481,23 @@ void setup()
                 }
 
 
+                if(DimUp_taskHandle!= NULL) 
+                {
+                  Serial.print("Stopping Dim Task...\n");
+                  vTaskDelete(DimUp_taskHandle);
+                }
+
+                if(DimDown_taskHandle!= NULL) 
+                {
+                  Serial.print("Stopping Dim Task...\n");
+                  vTaskDelete(DimDown_taskHandle);
+                }
+
+
                 DutyCyclePercent_u8 = 0;
                 SetPwmDutycycle();
+
+                digitalWrite(LED_INTERN, LOW);
                 
                 
 
@@ -600,7 +707,7 @@ void main_task(void * pvParameters)
     if((digitalRead(SWITCH1) == 0) && (LightOn_b == false) && (DimTaskRunning_b == false)) 
     {
       //switch light on
-      Serial.print("dimming up...\n");
+      Serial.print("HW switch dimming up...\n");
       
       LightOn_b = true;
       digitalWrite(LED_INTERN, HIGH);
@@ -610,13 +717,13 @@ void main_task(void * pvParameters)
       StopDutyCycle_u8 = 100;
       RampUpTimeSec_u16 = 2;
       RampDownTimeSec_u16 = 0;
-      xTaskCreate(DimUp_task, "DimUp task", 1024, NULL, 1, NULL);
+      xTaskCreate(DimUp_task, "DimUp task", 1024, NULL, 1, &DimUp_taskHandle);
     }
 
     else if((digitalRead(SWITCH1) == 1) && (LightOn_b == true) && (DimTaskRunning_b == false)) 
     {
       //switch light off
-      Serial.print("dimming down...\n");
+      Serial.print("HW switch dimming down...\n");
               
       LightOn_b = false;
       digitalWrite(LED_INTERN, LOW);
@@ -626,9 +733,39 @@ void main_task(void * pvParameters)
       StopDutyCycle_u8 = 0;
       RampUpTimeSec_u16 = 0;
       RampDownTimeSec_u16 = 2;
-      xTaskCreate(DimDown_task, "DimDown task", 1024, NULL, 1, NULL);
+      xTaskCreate(DimDown_task, "DimDown task", 1024, NULL, 1, &DimDown_taskHandle);
     }
     //------
+
+
+    #ifdef USE_NTP
+      //update NTP client every 60sec (300 * 200msec)
+      
+
+      if(UpdateNtpCounter_u16 > 300)
+      {
+        UpdateNtpCounter_u16 = 0;
+
+        Serial.print("updating NTP client now...\n");
+
+        if(!timeClient.update()) 
+        {
+          timeClient.forceUpdate();
+        }
+
+        // The formattedDate comes with the following format:
+        // 2018-05-28T16:00:13Z
+        NtpFormattedDate = timeClient.getFormattedDate();
+
+        Serial.println("NTP date is: ");
+        Serial.println(NtpFormattedDate);
+
+        //set date and time of RTC
+      SetDateTime_v(NtpFormattedDate);
+      }
+
+      UpdateNtpCounter_u16++;
+    #endif
 
 
     
@@ -647,8 +784,8 @@ void LightControl_task(void * pvParameters)
 
   bool WaitForHold_b = false;
 
-  const uint16_t UpTimeSec_u16 = 10;
-  const uint16_t DownTimeSec_u16 = 10;
+  const uint16_t UpTimeSec_u16 = 70;
+  const uint16_t DownTimeSec_u16 = 70;
 
   const uint32_t HoldTimeSunriseSeconds_u32 = 10;
   const uint32_t HoldTimeSunsetSeconds_u32 = 10;
@@ -664,83 +801,218 @@ void LightControl_task(void * pvParameters)
 
   DateTime now;
 
+  Serial.print("Light Control Task Running...");
+
 
   while(1)
   { 
-    Serial.print("Light Control Task Running...");
-  
-    //get date and time
-    GetDateTime_v();
-
-    //get sunrise and sunset time
-    GetSunriseTime_v();
-    GetSunsetTime_v();
-
-    //DEBUG
-    Sunrise_st.tm_hour = DateTime_st.tm_hour;
-    Sunrise_st.tm_min = DateTime_st.tm_min;
-
-    //if sunrise time is reached, start dim up task
-    if((DateTime_st.tm_hour == Sunrise_st.tm_hour)
-        && (DateTime_st.tm_min == Sunrise_st.tm_min)
-        && WaitForHold_b == false)
-    {
-      //dim up light
-      Serial.print("dimming up...\n");
-      
-      digitalWrite(LED_INTERN, HIGH);
-
-      //create dim task
-      StartDutyCyclePercent_u8 = 0;
-      StopDutyCycle_u8 = 100;
-      RampUpTimeSec_u16 = UpTimeSec_u16;
-      RampDownTimeSec_u16 = 0;
-      xTaskCreate(DimUp_task, "DimUp task", 1024, NULL, 1, NULL);
-
-      WaitForHold_b = true;
-
-    }
-
-    //wait for hold time to expire
-    if(WaitForHold_b)
-    {
-      Serial.print("entering hold time loop...\n");
-
-      //save start timestamp
-      now = GetDateTime_v();
-      HoldStartTimestamp_u32 = now.unixtime();
-
-      Serial.print("HoldStartTimestamp: ");
-      Serial.print(HoldStartTimestamp_u32);
-      Serial.print("\n");
-
-      while(ExpiredHoldTimeSeconds_u32 < HoldTimeSunriseSeconds_u32)
-      {
-        now = GetDateTime_v();
-        ExpiredHoldTimeSeconds_u32 = now.unixtime() - HoldStartTimestamp_u32;
-
-        Serial.print("waiting for hold time to expire...\n");
-        Serial.print(ExpiredHoldTimeSeconds_u32);
-        Serial.print("sec of ");
-        Serial.print(HoldTimeSunriseSeconds_u32);
-        Serial.print("sec expired\n");
-
-        delay(2000);
-
-      }
-    }
-
     
+    //state machine
+    switch(LightControlState_u8)
+    {
+      case STATE_IDLE:
+
+        Serial.print("STATE = IDLE\n");
+
+        digitalWrite(LED_INTERN, LOW);
+
+        //get date and time
+        GetDateTime_v();
+
+        //get sunrise and sunset time
+        GetSunriseTime_v();
+        GetSunsetTime_v();
+
+        //fake sunrise / sunset for DEBUGGING
+        Sunrise_st.tm_hour = DateTime_st.tm_hour;
+        Sunrise_st.tm_min = DateTime_st.tm_min;
+
+        //fake sunrise / sunset for DEBUGGING
+        //Sunset_st.tm_hour = DateTime_st.tm_hour;
+        //Sunset_st.tm_min = DateTime_st.tm_min;
+
+        //if SUNRISE time is reached, start dim up task
+        if((DateTime_st.tm_hour == Sunrise_st.tm_hour)
+            && (DateTime_st.tm_min == Sunrise_st.tm_min))
+        {
+          //dim up light
+          Serial.print("sunrise time reached...\n");
+
+          LightControlState_u8 = STATE_DIM_UP;
+
+          digitalWrite(LED_INTERN, HIGH);
+
+        }
 
 
-    //if hold time is up, switch off light
+
+        //if SUNSET time is reached, switch on light (100%) and wait hold time
+        if((DateTime_st.tm_hour == Sunset_st.tm_hour)
+            && (DateTime_st.tm_min == Sunset_st.tm_min))
+        {
+          //switch on light
+          Serial.print("sunset time reached...\n");
+
+          Serial.print("switch on light...\n");
+          DutyCyclePercent_u8 = 100;
+          SetPwmDutycycle();
+          
+          digitalWrite(LED_INTERN, HIGH);
+
+          LightControlState_u8 = STATE_WAITING_HOLD_TIME_SUNSET;
+
+        }
+
+        break;
 
 
-    //if sunset time is reached, switch on light (100%)
+      case STATE_DIM_UP:
 
-    //wait hold time
+          Serial.print("STATE = DIM UP\n");
 
-    //start dim down task
+          //dim up light
+          Serial.print("dimming up...\n");
+          
+          digitalWrite(LED_INTERN, HIGH);
+
+          //create dim task
+          StartDutyCyclePercent_u8 = 0;
+          StopDutyCycle_u8 = 100;
+          RampUpTimeSec_u16 = UpTimeSec_u16;
+          RampDownTimeSec_u16 = 0;
+          xTaskCreate(DimUp_task, "DimUp task", 1024, NULL, 1, &DimUp_taskHandle);
+
+
+          LightControlState_u8 = STATE_WAITING_HOLD_TIME_SUNRISE;
+
+          break;
+
+
+        case STATE_DIM_DOWN:
+
+          Serial.print("STATE = DIM DOWN\n");
+
+          //dim down light
+          Serial.print("dimming down...\n");
+          
+          digitalWrite(LED_INTERN, LOW);
+
+          //create dim task
+          StartDutyCyclePercent_u8 = 100;
+          StopDutyCycle_u8 = 0;
+          RampUpTimeSec_u16 = 0;
+          RampDownTimeSec_u16 = DownTimeSec_u16;
+          xTaskCreate(DimDown_task, "DimDown task", 1024, NULL, 1, &DimDown_taskHandle);
+
+
+          LightControlState_u8 = STATE_IDLE;
+
+          break;
+
+
+        case STATE_WAITING_HOLD_TIME_SUNRISE:
+
+          Serial.print("STATE = WAIT HOLD SUNRISE\n");
+
+          //wait for hold time to expire
+          Serial.print("entering hold time loop...\n");
+
+          //save start timestamp
+          now = GetDateTime_v();
+          HoldStartTimestamp_u32 = now.unixtime();
+
+          Serial.print("HoldStartTimestamp: ");
+          Serial.print(HoldStartTimestamp_u32);
+          Serial.print("\n");
+
+          while(ExpiredHoldTimeSeconds_u32 < HoldTimeSunriseSeconds_u32 + RampUpTimeSec_u16)
+          {
+            now = GetDateTime_v();
+            ExpiredHoldTimeSeconds_u32 = now.unixtime() - HoldStartTimestamp_u32;
+
+            Serial.print("waiting for hold time to expire...\n");
+            Serial.print(ExpiredHoldTimeSeconds_u32);
+            Serial.print("sec of ");
+            Serial.print(HoldTimeSunriseSeconds_u32 + RampUpTimeSec_u16);
+            Serial.print("sec expired\n");
+
+            delay(2000);
+
+          }
+
+          LightControlState_u8 = STATE_IDLE;
+
+          ExpiredHoldTimeSeconds_u32 = 0;
+
+          DutyCyclePercent_u8 = 0;
+          SetPwmDutycycle();
+          
+          digitalWrite(LED_INTERN, LOW);
+
+          break;
+
+
+
+      case STATE_WAITING_HOLD_TIME_SUNSET:
+
+        Serial.print("STATE = WAIT HOLD SUNSET\n");
+
+          //wait for hold time to expire
+          Serial.print("entering hold time loop...\n");
+
+          //save start timestamp
+          now = GetDateTime_v();
+          HoldStartTimestamp_u32 = now.unixtime();
+
+          Serial.print("HoldStartTimestamp: ");
+          Serial.print(HoldStartTimestamp_u32);
+          Serial.print("\n");
+
+          while(ExpiredHoldTimeSeconds_u32 < HoldTimeSunsetSeconds_u32)
+          {
+            now = GetDateTime_v();
+            ExpiredHoldTimeSeconds_u32 = now.unixtime() - HoldStartTimestamp_u32;
+
+            Serial.print("waiting for hold time to expire...\n");
+            Serial.print(ExpiredHoldTimeSeconds_u32);
+            Serial.print("sec of ");
+            Serial.print(HoldTimeSunsetSeconds_u32);
+            Serial.print("sec expired\n");
+
+            delay(2000);
+
+          }
+
+          LightControlState_u8 = STATE_DIM_DOWN;
+
+          ExpiredHoldTimeSeconds_u32 = 0;
+
+          break;
+
+
+        case STATE_STOP:
+
+          Serial.print("STATE = WAIT HOLD SUNSET\n");
+
+          ExpiredHoldTimeSeconds_u32 = 0;
+
+          DutyCyclePercent_u8 = 0;
+          SetPwmDutycycle();
+
+          digitalWrite(LED_INTERN, LOW);
+
+          LightControlState_u8 = STATE_IDLE;
+          
+          break;
+
+
+
+
+      default:
+        break;
+    }
+
+
 
 
     
@@ -856,6 +1128,48 @@ String processor(const String& var)
 
     
   }
+
+
+  else if(var == "STATE")
+  {
+    switch(LightControlState_u8)
+    {
+      case STATE_IDLE:
+        RetStr = "IDLE"; 
+        break;
+      
+      case STATE_DIM_UP:
+        RetStr = "DIM UP"; 
+        break;
+
+      case STATE_DIM_DOWN:
+        RetStr = "DIM DOWN"; 
+        break;
+
+      case STATE_WAITING_HOLD_TIME_SUNRISE:
+        RetStr = "WAIT TIME SUNRISE"; 
+        break;
+
+      case STATE_WAITING_HOLD_TIME_SUNSET:
+        RetStr = "WAIT TIME SUNSET"; 
+        break;
+
+      case STATE_STOP:
+        RetStr = "STOPPING"; 
+        break;
+
+      default:
+        break;
+    }
+
+    if(LightControlRunning_b == false)
+    {
+      RetStr = RetStr + " (OFF)";
+    }
+    
+  }
+
+
 
 
   else if(var == "SUNRISE")

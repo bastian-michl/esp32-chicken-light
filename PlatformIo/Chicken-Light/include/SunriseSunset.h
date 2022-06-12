@@ -3,6 +3,7 @@
 //sunrise and sunset times for calendar weeks 1...52, format: SunriseH,SunriseM,SunsetH,SunsetM
 //coordinates: 51.32646730,9.17108270 (Wolfhagen, DE)
 //year: 2022
+// GMT +1 (without DST!)
 const uint8_t SunriseSunset_au8 [52] [4] =   
 {
     {8,27,16,28},
