@@ -8,7 +8,8 @@
 //
 //  TODO
 //
-//  * wifi hotspot mode
+//  * wifi hotspot mode   OK
+//  * static IP address   OK
 //  * web server
 //      pass values via html form (adjust RTC time+date, rise and fall times, threshold for light sensor)     OK
 //      buttons enable/disable light control and visualize running light control TESTING
@@ -18,16 +19,17 @@
 //      init                                  OK
 //      set date + time                       OK
 //      read date + time                      OK
+//  * fetch time via NTP                      OK
 //  * PWM dimming led strip
-//  * light sensor
-//  * switch SW1 switch light on permanently
+//  * light sensor                            XXX
+//  * switch SW1 switch light on permanently  OK
 //  * sunrise / sunset table                  OK
-//  * twillight times
-//  * calculate calendar week from date       OK
+//  * twillight times                         OK
 //  * DS18B20 temperature sensor
 //      init                                  OK
 //      read temperature                      OK
 //  * dim up / down using tasks               OK
+//  * light control task with state machine   OK
 //------------------------------
 
 //includes
@@ -68,6 +70,14 @@
 //constants
 //------------------------------
 
+//version
+const uint8_t VER_MAJOR_U8 = 1;
+const uint8_t VER_MINOR_U8 = 1;
+
+//DEBUG
+#define DEBUG_SUNRISE
+//#define DEBUG_SUNSET
+
 //LED
 #define LED_GREEN     26
 #define LED_INTERN    2
@@ -100,6 +110,10 @@ const uint8_t PwmResolutionBit_u8 = 13;
 
 
 #define ESP_getChipId()   ((uint32_t)ESP.getEfuseMac())
+
+//WiFi
+#define STATIC_IP   //use static IP instead of DHCP
+String hostname = "chickenlight";
 
 //webserver
 const char* PARAM_INPUT_1 = "InputDateTime";
@@ -135,6 +149,12 @@ AsyncWebServer server(80);
 
 //WiFi
 bool WifiConnected_b = false;
+#ifdef STATIC_IP
+  IPAddress local_IP(192, 168, 178, 199);   //static IP
+  IPAddress gateway(192, 168, 178, 1);      // gateway IP
+  IPAddress subnet(255, 255, 255, 0);
+  IPAddress primaryDNS(192, 168, 178, 1);
+#endif
 
 //RTC DS3132
 RTC_DS3231 rtc;     //examples: https://wolles-elektronikkiste.de/ds3231-echtzeituhr
@@ -153,6 +173,7 @@ DallasTemperature DS18B20(&oneWire);
 tm DateTime_st;
 tm Sunrise_st;
 tm Sunset_st;
+
 
 uint16_t UpdateNtpCounter_u16 = 0;
 String NtpFormattedDate;
@@ -175,6 +196,9 @@ bool DimTaskRunning_b = false;
 
 bool LightControlRunning_b = false;
 uint8_t LightControlState_u8 = STATE_IDLE;
+
+uint8_t DimTimeMinFromTable_u8 = 0;
+uint8_t HoldTimeMinFromTable_u8 = 0;
 
 TaskHandle_t LightControl_taskHandle;
 TaskHandle_t DimUp_taskHandle;
@@ -259,7 +283,17 @@ void setup()
     WifiConnected_b = true;
   #else
     //start as client
+    WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);
+    WiFi.setHostname(hostname.c_str());
+
     WiFi.mode(WIFI_STA);
+
+    #ifdef STATIC_IP
+      WiFi.config(local_IP, gateway, subnet, primaryDNS);
+    #endif
+
+    
+  
     WiFi.begin(ssid, password);
     if (WiFi.waitForConnectResult() != WL_CONNECTED) 
     {
@@ -782,22 +816,14 @@ void main_task(void * pvParameters)
 void LightControl_task(void * pvParameters) 
 {
 
-  bool WaitForHold_b = false;
+  uint16_t UpTimeSec_u16 = 0;      //time spent for dim up 
+  uint16_t DownTimeSec_u16 = 0;    //time spent for dim down
 
-  const uint16_t UpTimeSec_u16 = 70;
-  const uint16_t DownTimeSec_u16 = 70;
-
-  const uint32_t HoldTimeSunriseSeconds_u32 = 10;
-  const uint32_t HoldTimeSunsetSeconds_u32 = 10;
+  uint32_t HoldTimeSunriseSeconds_u32 = 0;
+  uint32_t HoldTimeSunsetSeconds_u32 = 0;
 
   uint32_t HoldStartTimestamp_u32 = 0;
   uint32_t ExpiredHoldTimeSeconds_u32 = 0;
-
-
-  const int OffsetHourSunrise_u32 = 0;
-  const int OffsetMinuteSunrise_u32 = 0;
-  const int OffsetHourSunset_u32 = 0;
-  const int OffsetMinuteSunset_u32 = 0;
 
   DateTime now;
 
@@ -823,17 +849,84 @@ void LightControl_task(void * pvParameters)
         GetSunriseTime_v();
         GetSunsetTime_v();
 
+        //Dim time and hold time
+        UpTimeSec_u16 = DimTimeMinFromTable_u8 * 60;
+        DownTimeSec_u16 = DimTimeMinFromTable_u8 * 60;
+        HoldTimeSunriseSeconds_u32 = HoldTimeMinFromTable_u8 * 60;
+        HoldTimeSunsetSeconds_u32 = HoldTimeMinFromTable_u8 * 60;
+
+        //calculate time for "new" sunrise and sunset
+        if(DimTimeMinFromTable_u8 == 60)
+        {
+          Sunrise_st.tm_hour =- 1;
+          
+        }
+
+        if(DimTimeMinFromTable_u8 == 120)
+        {
+          Sunrise_st.tm_hour =- 2;
+        }
+
+
+        if(HoldTimeMinFromTable_u8 == 30)
+        {
+          if(Sunrise_st.tm_min >= 30)
+          {
+            Sunrise_st.tm_min =- 30;
+          }
+          else
+          {
+            Sunrise_st.tm_min = 60 - (30-Sunrise_st.tm_min);
+            Sunrise_st.tm_hour =- 1;
+          }
+        }
+
+        if(HoldTimeMinFromTable_u8 == 60)
+        {
+          Sunrise_st.tm_hour =- 1;
+        }
+
+        if(HoldTimeMinFromTable_u8 == 90)
+        {
+          Sunrise_st.tm_hour =- 1;
+
+          if(Sunrise_st.tm_min >= 30)
+          {
+            Sunrise_st.tm_min =- 30;
+          }
+          else
+          {
+            Sunrise_st.tm_min = 60 - (30-Sunrise_st.tm_min);
+            Sunrise_st.tm_hour =- 1;
+          }
+        }
+
+        
         //fake sunrise / sunset for DEBUGGING
-        Sunrise_st.tm_hour = DateTime_st.tm_hour;
-        Sunrise_st.tm_min = DateTime_st.tm_min;
+        #ifdef DEBUG_SUNRISE
+          Sunrise_st.tm_hour = DateTime_st.tm_hour;
+          Sunrise_st.tm_min = DateTime_st.tm_min;
+          DimTimeMinFromTable_u8 = 60;
+          HoldTimeMinFromTable_u8 = 60;
+          UpTimeSec_u16 = 60 * 60;
+          HoldTimeSunriseSeconds_u32 = 60 * 60;
+        #endif
 
         //fake sunrise / sunset for DEBUGGING
-        //Sunset_st.tm_hour = DateTime_st.tm_hour;
-        //Sunset_st.tm_min = DateTime_st.tm_min;
+        #ifdef DEBUG_SUNSET
+          Sunset_st.tm_hour = DateTime_st.tm_hour;
+          Sunset_st.tm_min = DateTime_st.tm_min;
+          DimTimeMinFromTable_u8 = 60;
+          HoldTimeMinFromTable_u8 = 60;
+          DownTimeSec_u16 = 60 * 60;
+          HoldTimeSunsetSeconds_u32 = 60 * 60;
+        #endif
 
         //if SUNRISE time is reached, start dim up task
+        //only if dim up time or hold time is greater than zero
         if((DateTime_st.tm_hour == Sunrise_st.tm_hour)
-            && (DateTime_st.tm_min == Sunrise_st.tm_min))
+            && (DateTime_st.tm_min == Sunrise_st.tm_min)
+            && ( (DimTimeMinFromTable_u8 > 0) || (HoldTimeMinFromTable_u8 > 0) ) )
         {
           //dim up light
           Serial.print("sunrise time reached...\n");
@@ -847,8 +940,10 @@ void LightControl_task(void * pvParameters)
 
 
         //if SUNSET time is reached, switch on light (100%) and wait hold time
+        //only if dim up time or hold time is greater than zero
         if((DateTime_st.tm_hour == Sunset_st.tm_hour)
-            && (DateTime_st.tm_min == Sunset_st.tm_min))
+            && (DateTime_st.tm_min == Sunset_st.tm_min)
+            && ( (DimTimeMinFromTable_u8 > 0) || (HoldTimeMinFromTable_u8 > 0) ) )
         {
           //switch on light
           Serial.print("sunset time reached...\n");
@@ -1263,6 +1358,12 @@ String processor(const String& var)
   }
 
 
+  else if(var == "VERSION")
+  {
+    RetStr = String(VER_MAJOR_U8) + "." + String(VER_MINOR_U8);
+  }
+
+
 
   return RetStr;
 }
@@ -1535,6 +1636,12 @@ void GetSunriseTime_v(void)
 
   Sunrise_st.tm_hour = SunriseSunset_au8 [CalendarWeekNumber_u8 - 1] [0];
   Sunrise_st.tm_min = SunriseSunset_au8 [CalendarWeekNumber_u8 - 1] [1];
+
+  //dim time and hold time
+  DimTimeMinFromTable_u8 = SunriseSunset_au8 [CalendarWeekNumber_u8 - 1] [4];
+  HoldTimeMinFromTable_u8 = SunriseSunset_au8 [CalendarWeekNumber_u8 - 1] [5];
+
+
 }
 //------------------------------
 
@@ -1546,6 +1653,10 @@ void GetSunsetTime_v(void)
 {
   Sunset_st.tm_hour = SunriseSunset_au8 [CalendarWeekNumber_u8 - 1] [2];
   Sunset_st.tm_min = SunriseSunset_au8 [CalendarWeekNumber_u8 - 1] [3];
+
+  //dim time and hold time
+  DimTimeMinFromTable_u8 = SunriseSunset_au8 [CalendarWeekNumber_u8 - 1] [4];
+  HoldTimeMinFromTable_u8 = SunriseSunset_au8 [CalendarWeekNumber_u8 - 1] [5];
 }
 //------------------------------
 
