@@ -75,7 +75,7 @@ const uint8_t VER_MAJOR_U8 = 1;
 const uint8_t VER_MINOR_U8 = 1;
 
 //DEBUG
-#define DEBUG_SUNRISE
+//#define DEBUG_SUNRISE
 //#define DEBUG_SUNSET
 
 //LED
@@ -1387,7 +1387,7 @@ void SetPwmDutycycle(void)
 //------------------------------
 void DimUp_v(void)
 {
-    uint8_t DutyCycleSteps_u8 = StartDutyCyclePercent_u8 - StopDutyCycle_u8;
+    uint8_t DutyCycleSteps_u8 =  StopDutyCycle_u8 - StartDutyCyclePercent_u8;
 
     uint32_t DelayBetweenStepsMsec_u32 = RampUpTimeSec_u16 * 1000 / DutyCycleSteps_u8;
 
